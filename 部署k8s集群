@@ -55,4 +55,86 @@ yum install kubectl-1.13.3-0.x86_64 --nogpgcheck
 yum install kubeadm-1.13.3-0.x86_64 --nogpgcheck
 systemctl enable kubelet
 
-三、
+三、部署Kubernetes Master
+1、将以下步骤部署在master节点上
+kubeadm init \
+--apiserver-advertise-address=192.168.159.132 \
+--image-repository registry.aliyuncs.com/google_containers \
+--kubernetes-version v1.13.3 \
+--service-cidr=10.1.0.0/16 \
+--pod-network-cidr=10.244.0.0/16
+
+2、为了顺利使用kubectl命令，执行以下命令
+mkdir -p $HOME/.kube
+cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+chown $(id -u):$(id -g) $HOME/.kube/config
+kubectl get nodes
+
+3、使用kubectl
+kubectl get nodes
+
+4、部署Pod网络插件（CNI）
+kubectl apply -f \
+https://raw.githubusercontent.com/coreos/flannel/a70459be0084506e4ec919aa1c114638878db11b/Documentation/kube-flannel.yml
+
+5、然后通过以下命令验证：全部为Running则OK，其中一个不为Running，比如：Pending、ImagePullBackOff都表明Pod没有就绪
+kubectl get pods -n kube-system
+如果其中有的Pod没有Running，可以通过以下命令查看具体错误原因，比如这里我想查看kube-flannel-ds-amd64-8bmbm这个pod的错误信息：
+kubectl describe pod kube-flannel-ds-amd64-8bmbm -n kube-system
+在此过程中可能会遇到无法从qury.io拉取flannel镜像从而导致无法正常Running，解决办法如下：
+使用国内云服务商提供的镜像源然后通过修改tag的方式曲线救国
+docker pull quay-mirror.qiniu.com/coreos/flannel:v0.11.0-amd64
+docker tag quay-mirror.qiniu.com/coreos/flannel:v0.11.0-amd64 quay.io/coreos/flannel:v0.10.0-amd64
+docker rmi quay-mirror.qiniu.com/coreos/flannell:v0.11.0-amd64
+这时，我们再看看master节点的状态就会从NotReady变为Ready：
+kubectl get nodes
+
+四、加入Kubernetes Node
+1、加入集群的命（在master上运行）
+[root@k8s-master ~]# kubeadm token create --print-join-command
+kubeadm join 192.168.159.132:6443 --token snlrkf.4cd196eru0wqn8az --discovery-token-ca-cert-hash sha256:af4edf4a7e92469ffb6c6945612a8dd29105afefaea1b93443f4aead963b8dc9
+将运行结果在每个node节点上运行。
+加入成功的提示信息：
+This node has joined the cluster:
+* Certificate signing request was sent to apiserver and a response was received.
+* The Kubelet was informed of the new secure connection details.
+
+Run 'kubectl get nodes' on the master to see this node join the cluster.
+
+2、查看节点状态
+[root@k8s-master ~]# kubectl get nodes
+NAME         STATUS   ROLES    AGE    VERSION
+k8s-master   Ready    master   29m    v1.13.3
+k8s-node1    Ready    <none>   115s   v1.13.3
+k8s-node2    Ready    <none>   108s   v1.13.3
+
+3、测试K8S集群
+[root@k8s-master ~]# kubectl create deployment nginx --image=nginx
+deployment.apps/nginx created
+[root@k8s-master ~]# kubectl expose deployment nginx --port=80 --type=NodePort
+service/nginx exposed
+[root@k8s-master ~]# kubectl get pod,svc
+NAME                       READY   STATUS              RESTARTS   AGE
+pod/nginx-5c7588df-lpbt4   0/1     ContainerCreating   0          14s
+
+NAME                 TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)        AGE
+service/kubernetes   ClusterIP   10.1.0.1      <none>        443/TCP        30m
+service/nginx        NodePort    10.1.196.65   <none>        80:31238/TCP   6s
+查看pod被部署在哪个node上：
+[root@k8s-master ~]# kubectl get pods,svc -o wide
+NAME                       READY   STATUS    RESTARTS   AGE   IP           NODE        NOMINATED NODE   READINESS GATES
+pod/nginx-5c7588df-lpbt4   1/1     Running   0          39s   10.244.2.2   k8s-node2   <none>           <none>
+
+NAME                 TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)        AGE   SELECTOR
+service/kubernetes   ClusterIP   10.1.0.1      <none>        443/TCP        30m   <none>
+service/nginx        NodePort    10.1.196.65   <none>        80:31238/TCP   31s   app=nginx
+因为是NodePort方式，因此其映射的端口号会在30000-32767范围内随机取一个，我们可以直接通过浏览器输入IP地址访问，比如这时我们通过浏览器来访问一下任一Node的IP地址加端口号，
+例如192.168.159.133:31238或192.168.159.134:31238
+看到以下信息即为成功：
+Welcome to nginx!
+If you see this page, the nginx web server is successfully installed and working. Further configuration is required.
+
+For online documentation and support please refer to nginx.org.
+Commercial support is available at nginx.com.
+
+Thank you for using nginx.
